@@ -3,63 +3,72 @@ import yfinance as yf
 from prophet import Prophet
 import pandas as pd
 import plotly.graph_objects as go
+from streamlit_autorefresh import st_autorefresh
 
-st.set_page_config(page_title="FX 10分足予測", layout="wide")
-st.title("💹 ドル円 10分足トレンド予測 (修正版)")
+# 1. ページ設定
+st.set_page_config(page_title="FX リアルタイム予測", layout="wide")
 
-@st.cache_data(ttl=600)
-def get_data():
-    # 取得期間を「5d（5日間）」から「7d（7日間）」に少し広げます
-    df = yf.download("USDJPY=X", period="7d", interval="1m")
-    
-    # データの存在チェック
+# 2. 自動更新の設定（例：60,000ミリ秒 = 1分ごとにページをリフレッシュ）
+# これにより、常に最新のデータを取得しに行きます
+st_autorefresh(interval=60 * 1000, key="fxtracker")
+
+st.title("💹 ドル円 リアルタイム・トレンド予測")
+st.caption("1分ごとに自動更新中（yfinanceのデータ仕様により数分の遅延が含まれる場合があります）")
+
+# 3. データ取得関数の改良
+@st.cache_data(ttl=60) # キャッシュを10分から「1分(60秒)」に短縮
+def get_latest_data():
+    # 直近1日分の1分足を取得（最新の状態を確保するため）
+    df = yf.download("USDJPY=X", period="1d", interval="1m")
     if df.empty:
         return pd.DataFrame()
-
-    # 10分足に集計
+    
+    # 最新の10分足にリサンプリング
     df_10m = df['Close'].resample('10min').last().dropna().reset_index()
     df_10m.columns = ['ds', 'y']
     df_10m['ds'] = df_10m['ds'].dt.tz_localize(None)
     return df_10m
 
 try:
-    df = get_data()
+    df = get_latest_data()
 
-    # データが予測に必要な最低ライン（ここでは念のため20行以上）あるかチェック
-    if len(df) < 20:
-        st.warning(f"現在データ取得中です。十分なデータが集まるまでお待ちください（現在のデータ数: {len(df)}）")
-        st.info("※週末や市場が閉まっている時間帯は新しいデータが取得できない場合があります。")
+    if len(df) < 2:
+        st.error("データの取得に失敗しました。市場が閉まっているか、一時的な通信エラーです。")
     else:
-        # 予測モデルの作成
+        # 最新価格の表示
+        current_price = df['y'].iloc[-1]
+        last_update = df['ds'].iloc[-1].strftime('%H:%M:%S')
+        
+        st.subheader(f"現在価格: {current_price:.3f} JPY (更新: {last_update})")
+
+        # 予測ロジック
         model = Prophet(
-            daily_seasonality=True, 
-            weekly_seasonality=True, 
-            yearly_seasonality=False,
-            changepoint_prior_scale=0.05 # 柔軟性を少し調整
+            changepoint_prior_scale=0.01,
+            daily_seasonality=True,
+            weekly_seasonality=False,
+            yearly_seasonality=False
         )
         model.fit(df)
         
-        # 未来1時間分を予測
-        future = model.make_future_dataframe(periods=6, freq='10min')
+        future = model.make_future_dataframe(periods=3, freq='10min')
         forecast = model.predict(future)
         
         # グラフ表示
         fig = go.Figure()
-        fig.add_trace(go.Scatter(x=df['ds'], y=df['y'], name="実績価格", line=dict(color='deepskyblue')))
-        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name="予測トレンド", line=dict(dash='dash', color='orange')))
+        fig.add_trace(go.Scatter(x=df['ds'], y=df['y'], name="実績", line=dict(color='#00CF80', width=2)))
+        fig.add_trace(go.Scatter(x=forecast['ds'], y=forecast['yhat'], name="予測", line=dict(dash='dash', color='#FF4B4B')))
         
-        fig.update_layout(xaxis_rangeslider_visible=False, template="plotly_white")
+        fig.update_layout(
+            margin=dict(l=20, r=20, t=20, b=20),
+            height=400,
+            template="plotly_dark", # 短期トレードで見やすいダークモード
+            xaxis_rangeslider_visible=False
+        )
         st.plotly_chart(fig, use_container_width=True)
-        
-        # 指標の表示
-        latest_price = df['y'].iloc[-1]
-        predicted_price = forecast['yhat'].iloc[-1]
-        diff = predicted_price - latest_price
-        
-        col1, col2, col3 = st.columns(3)
-        col1.metric("現在の価格", f"{latest_price:.3f}")
-        col2.metric("10分後の予想", f"{predicted_price:.3f}", f"{diff:.3f}")
-        col3.write(f"最終更新: {df['ds'].iloc[-1]}")
+
+        # 予測値の提示
+        next_pred = forecast['yhat'].iloc[-1]
+        st.info(f"次回の10分足 予測ターゲット: {next_pred:.3f} JPY")
 
 except Exception as e:
-    st.error(f"システムエラー: {e}")
+    st.info("データ更新待ち、または市場休止中です。")
