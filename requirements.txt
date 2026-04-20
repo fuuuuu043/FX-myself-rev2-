@@ -3,3 +3,4 @@ yfinance
 prophet
 plotly
 pandas
+streamlit-autorefresh
